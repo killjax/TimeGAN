@@ -1,6 +1,8 @@
 import tensorflow as tf
 import numpy as np
 
+AUTOTUNE = tf.data.AUTOTUNE
+
 # Assuming the 'utils' functions (rnn_cell, etc.) have been
 # updated for TF 2.x as we did in previous steps.
 from utils import extract_time, rnn_cell, random_generator, batch_generator
@@ -187,6 +189,26 @@ def timegan(ori_data, parameters):
     z_dim = dim
     gamma = 1
 
+    # --- START: Performance Pipeline (NEW CODE) ---
+    # 1. Create dataset from the normalized data and time arrays
+    #    (ori_data and ori_time are now NumPy arrays)
+    dataset = tf.data.Dataset.from_tensor_slices((ori_data, ori_time))
+
+    # 2. Apply all optimizations
+    dataset = dataset.cache()  # Cache the normalized data in RAM
+    dataset = dataset.shuffle(buffer_size=no)  # Shuffle the entire dataset
+    dataset = dataset.batch(batch_size)
+
+    # 3. Prefetch batches to the GPU asynchronously
+    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
+
+    # 4. Make the dataset repeat indefinitely for our training loops
+    dataset = dataset.repeat()
+
+    # 5. Create the iterator that the loops will use
+    data_iterator = iter(dataset)
+    # --- END: Performance Pipeline ---
+
     embedder = build_embedder(max_seq_len, dim, hidden_dim, num_layers, module_name)
     recovery = build_recovery(max_seq_len, dim, hidden_dim, num_layers, module_name)
     generator = build_generator(max_seq_len, z_dim, hidden_dim, num_layers, module_name)
@@ -310,9 +332,8 @@ def timegan(ori_data, parameters):
     # 1. Embedding network training
     print("Start Embedding Network Training")
     for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-        X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
-        T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
+        # Get the next pre-fetched batch. Tensors are already created.
+        X_mb_t, T_mb_t = next(data_iterator)
         step_e_loss = train_step_embedder(X_mb_t, T_mb_t)
         if itt % 1000 == 0:
             print(
@@ -324,9 +345,8 @@ def timegan(ori_data, parameters):
     # 2. Training only with supervised loss
     print("Start Training with Supervised Loss Only")
     for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-        X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
-        T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
+        # Get the next pre-fetched batch
+        X_mb_t, T_mb_t = next(data_iterator)
         step_g_loss_s = train_step_supervisor(X_mb_t, T_mb_t)
         if itt % 1000 == 0:
             print(
@@ -340,19 +360,19 @@ def timegan(ori_data, parameters):
     step_d_loss = 0.0  # Initialize in case d_loss isn't run
     for itt in range(iterations):
         for _ in range(2):
-            X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-            Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
-            X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
-            T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
+            # Get pre-fetched batch
+            X_mb_t, T_mb_t = next(data_iterator)
+            # Generate Z_mb based on the T_mb from this batch
+            # We use .numpy() because random_generator likely expects a NumPy array
+            Z_mb = random_generator(batch_size, z_dim, T_mb_t.numpy(), max_seq_len)
             Z_mb_t = tf.convert_to_tensor(Z_mb, dtype=tf.float32)
             _, step_g_loss_u, step_g_loss_s, step_g_loss_v, step_e_loss_t0 = (
                 train_step_joint(X_mb_t, T_mb_t, Z_mb_t)
             )
 
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-        Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
-        X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
-        T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
+        X_mb_t, T_mb_t = next(data_iterator)
+        # Generate Z_mb based on the T_mb from this batch
+        Z_mb = random_generator(batch_size, z_dim, T_mb_t.numpy(), max_seq_len)
         Z_mb_t = tf.convert_to_tensor(Z_mb, dtype=tf.float32)
 
         step_d_loss, step_g_loss_u, step_g_loss_s, step_g_loss_v, step_e_loss_t0 = (
