@@ -1,12 +1,10 @@
 import tensorflow as tf
 import numpy as np
 
-# Assuming the 'utils' functions (rnn_cell, etc.) have been
-# updated for TF 2.x as we did in previous steps.
 from utils import extract_time, rnn_cell, random_generator, batch_generator
 
 
-# Helper function (from original code, requires no changes)
+# Helper function
 def MinMaxScaler(data):
     """Min-Max Normalizer.
     Args:
@@ -29,8 +27,7 @@ def MinMaxScaler(data):
 
 
 # --- Keras Model Definitions (Replaces tf.variable_scope) ---
-# This version stacks RNN layers in a loop, which is the
-# correct and robust way to build a MultiRNN in TF 2.x.
+# Stacks RNN layers in a loop, which is the correct and robust way to build a MultiRNN in TF 2.x.
 
 
 def build_embedder(max_seq_len, dim, hidden_dim, num_layers, module_name):
@@ -42,16 +39,12 @@ def build_embedder(max_seq_len, dim, hidden_dim, num_layers, module_name):
         T_input
     )
 
-    # --- FIX APPLIED HERE ---
     # Stack RNN layers in a loop
     x = X_input
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        # return_sequences=True is required for all but the last layer
-        # in a stack, but here we need it for all layers.
         x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
-    # --- END OF FIX ---
 
     H = tf.keras.layers.Dense(hidden_dim, activation="sigmoid", name="Embedder_Dense")(
         e_outputs
@@ -69,13 +62,11 @@ def build_recovery(max_seq_len, dim, hidden_dim, num_layers, module_name):
         T_input
     )
 
-    # --- FIX APPLIED HERE ---
     x = H_input
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
         x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
     r_outputs = x
-    # --- END OF FIX ---
 
     X_tilde = tf.keras.layers.Dense(dim, activation="sigmoid", name="Recovery_Dense")(
         r_outputs
@@ -93,13 +84,11 @@ def build_generator(max_seq_len, z_dim, hidden_dim, num_layers, module_name):
         T_input
     )
 
-    # --- FIX APPLIED HERE ---
     x = Z_input
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
         x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
-    # --- END OF FIX ---
 
     E = tf.keras.layers.Dense(hidden_dim, activation="sigmoid", name="Generator_Dense")(
         e_outputs
@@ -117,8 +106,7 @@ def build_supervisor(max_seq_len, hidden_dim, num_layers, module_name):
         T_input
     )
 
-    # --- FIX APPLIED HERE ---
-    # Ensure at least one layer, as original code implies num_layers >= 2
+    # Ensure at least one layer, num_layers >= 2
     num_supervisor_layers = max(1, num_layers - 1)
 
     x = H_input
@@ -126,7 +114,6 @@ def build_supervisor(max_seq_len, hidden_dim, num_layers, module_name):
         cell = rnn_cell(module_name, hidden_dim)
         x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
-    # --- END OF FIX ---
 
     S = tf.keras.layers.Dense(
         hidden_dim, activation="sigmoid", name="Supervisor_Dense"
@@ -144,13 +131,11 @@ def build_discriminator(max_seq_len, hidden_dim, num_layers, module_name):
         T_input
     )
 
-    # --- FIX APPLIED HERE ---
     x = H_input
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
         x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
     d_outputs = x
-    # --- END OF FIX ---
 
     Y_hat = tf.keras.layers.Dense(1, activation=None, name="Discriminator_Dense")(
         d_outputs
@@ -230,7 +215,7 @@ def timegan(ori_data, parameters):
 
     @tf.function
     def train_step_joint(X_mb, T_mb, Z_mb):
-        # --- Generator Training ---
+        # --- Generator Training Twice---
         with tf.GradientTape() as g_tape:
             H = embedder([X_mb, T_mb], training=True)
             E_hat = generator([Z_mb, T_mb], training=True)
@@ -266,7 +251,42 @@ def timegan(ori_data, parameters):
         gradients_g = g_tape.gradient(G_loss, vars_g)
         G_optimizer.apply_gradients(zip(gradients_g, vars_g))
 
-        # --- Embedder Training ---
+        with tf.GradientTape() as g_tape:
+            H = embedder([X_mb, T_mb], training=True)
+            E_hat = generator([Z_mb, T_mb], training=True)
+            H_hat = supervisor([E_hat, T_mb], training=True)
+            X_hat = recovery([H_hat, T_mb], training=True)
+
+            Y_fake = discriminator([H_hat, T_mb], training=False)
+            Y_real = discriminator([H, T_mb], training=False)
+            Y_fake_e = discriminator([E_hat, T_mb], training=False)
+
+            G_loss_U = bce(tf.ones_like(Y_fake), Y_fake)
+            G_loss_U_e = bce(tf.ones_like(Y_fake_e), Y_fake_e)
+
+            H_hat_supervise = supervisor([H, T_mb], training=True)
+            G_loss_S = mse(H[:, 1:, :], H_hat_supervise[:, :-1, :])
+
+            G_loss_V1 = tf.reduce_mean(
+                tf.abs(
+                    tf.sqrt(tf.nn.moments(X_hat, [0])[1] + 1e-6)
+                    - tf.sqrt(tf.nn.moments(X_mb, [0])[1] + 1e-6)
+                )
+            )
+            G_loss_V2 = tf.reduce_mean(
+                tf.abs((tf.nn.moments(X_hat, [0])[0]) - (tf.nn.moments(X_mb, [0])[0]))
+            )
+            G_loss_V = G_loss_V1 + G_loss_V2
+
+            G_loss = (
+                G_loss_U + gamma * G_loss_U_e + 100 * tf.sqrt(G_loss_S) + 100 * G_loss_V
+            )
+
+        vars_g = generator.trainable_variables + supervisor.trainable_variables
+        gradients_g = g_tape.gradient(G_loss, vars_g)
+        G_optimizer.apply_gradients(zip(gradients_g, vars_g))
+
+        # --- Embedder Training Twice---
         with tf.GradientTape() as e_tape:
             H = embedder([X_mb, T_mb], training=True)
             X_tilde = recovery([H, T_mb], training=True)
@@ -285,7 +305,25 @@ def timegan(ori_data, parameters):
         gradients_e = e_tape.gradient(E_loss, vars_e)
         E_optimizer.apply_gradients(zip(gradients_e, vars_e))
 
-        # --- Discriminator Training ---
+        with tf.GradientTape() as e_tape:
+            H = embedder([X_mb, T_mb], training=True)
+            X_tilde = recovery([H, T_mb], training=True)
+
+            H_hat_supervise = supervisor([H, T_mb], training=True)
+            G_loss_S_e = mse(
+                H[:, 1:, :], H_hat_supervise[:, :-1, :]
+            )  # Use a different name
+
+            E_loss_T0 = mse(X_mb, X_tilde)
+
+            E_loss0 = 10 * tf.sqrt(E_loss_T0)
+            E_loss = E_loss0 + 0.1 * G_loss_S_e
+
+        vars_e = embedder.trainable_variables + recovery.trainable_variables
+        gradients_e = e_tape.gradient(E_loss, vars_e)
+        E_optimizer.apply_gradients(zip(gradients_e, vars_e))
+
+        # --- Discriminator Training Once---
         with tf.GradientTape() as d_tape:
             H = embedder([X_mb, T_mb], training=False)
             E_hat = generator([Z_mb, T_mb], training=False)
@@ -339,16 +377,6 @@ def timegan(ori_data, parameters):
     print("Start Joint Training")
     step_d_loss = 0.0  # Initialize in case d_loss isn't run
     for itt in range(iterations):
-        for _ in range(2):
-            X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-            Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
-            X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
-            T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
-            Z_mb_t = tf.convert_to_tensor(Z_mb, dtype=tf.float32)
-            _, step_g_loss_u, step_g_loss_s, step_g_loss_v, step_e_loss_t0 = (
-                train_step_joint(X_mb_t, T_mb_t, Z_mb_t)
-            )
-
         X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
         Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
         X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
