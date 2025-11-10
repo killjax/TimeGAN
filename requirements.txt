@@ -8,3 +8,4 @@ matplotlib
 protobuf
 ipykernel
 yfinance
+seaborn

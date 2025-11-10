@@ -85,3 +85,131 @@ def real_data_processing(ori_data, seq_len):
         data.append(temp_data[idx[i]])
 
     return data
+
+
+def calculate_window_metrics(window, adj_close_idx, log_return_idx):
+    """
+    Calculates Volatility and Max Drawdown for a single (60, 12) window.
+    """
+    # 1. Extract the required time-series
+    # 'Adj Close' is at index 0
+    prices = window[:, adj_close_idx]
+    # 'Log_Return' is at index 6
+    log_returns = window[:, log_return_idx]
+
+    # 2. Calculate Volatility
+    # "standard deviation of the 1-day log returns"
+    volatility = np.std(log_returns)
+
+    # 3. Calculate Maximum Drawdown (MDD)
+    # "using its 'AdjClose' prices"
+    running_max = np.maximum.accumulate(prices)
+    # Add 1e-9 to avoid division by zero if running_max is 0
+    drawdowns = (running_max - prices) / (running_max + 1e-9)
+    max_drawdown = np.max(drawdowns)
+
+    return volatility, max_drawdown
+
+
+def label_data(ori_data, feature_names):
+    """
+    Applies the two-stage labeling process to the entire dataset.
+
+    Args:
+        ori_data (list): A list of (60, 12) numpy arrays.
+        feature_names (list): The list of 12 feature names in order.
+
+    Returns:
+        tuple: (ori_data_s, metrics_df)
+            ori_data_s (list): The list of one-hot encoded labels.
+            metrics_df (pd.DataFrame): DataFrame with metrics and string labels.
+    """
+
+    # Define percentile thresholds
+    CRISIS_PERCENTILE = 0.90  # Top 10% of drawdowns
+    VOLATILE_PERCENTILE = 0.85  # Top 15% of volatility (from non-crisis)
+
+    # Get the column indices from the feature names
+    try:
+        adj_close_idx = feature_names.index("Adj Close")
+        log_return_idx = feature_names.index("Log_Return")
+    except ValueError as e:
+        print(f"Error: Missing required feature in 'feature_names'. {e}")
+        return None, None
+
+    # --- Step 1: Calculate Metrics for Every Window ---
+    print(f"\nStep 1: Calculating metrics for {len(ori_data)} windows...")
+
+    all_metrics = []
+    for window in ori_data:
+        vol, mdd = calculate_window_metrics(window, adj_close_idx, log_return_idx)
+        all_metrics.append({"volatility": vol, "mdd": mdd})
+
+    # Create the DataFrame as suggested
+    metrics_df = pd.DataFrame(all_metrics)
+    print("Metric calculation complete.")
+
+    # --- Step 2: Apply a Two-Stage Labeling System ---
+    print("\nStep 2: Applying two-stage labeling...")
+
+    # Stage 1: Identify 'Crisis' (Drawdown-Based)
+    crisis_threshold = metrics_df["mdd"].quantile(CRISIS_PERCENTILE)
+    print(
+        f"  - Crisis MDD Threshold ({CRISIS_PERCENTILE*100}th percentile): {crisis_threshold:.4f}"
+    )
+
+    # Initialize all labels as 'Normal' by default
+    metrics_df["label"] = "Normal"
+
+    # Apply 'Crisis' label
+    crisis_mask = metrics_df["mdd"] > crisis_threshold
+    metrics_df.loc[crisis_mask, "label"] = "Crisis"
+
+    # Stage 2: Differentiate 'Volatile' vs. 'Normal' (Volatility-Based)
+    # Create a mask for all non-crisis windows
+    non_crisis_mask = metrics_df["label"] != "Crisis"
+
+    # Find the volatility threshold *only from the non-crisis windows*
+    volatile_threshold = metrics_df.loc[non_crisis_mask, "volatility"].quantile(
+        VOLATILE_PERCENTILE
+    )
+    print(
+        f"  - Volatile Vol Threshold ({VOLATILE_PERCENTILE*100}th percentile of non-crisis): {volatile_threshold:.4f}"
+    )
+
+    # Apply 'Volatile' label
+    # A window is 'Volatile' if it is NOT 'Crisis' AND its volatility is above the threshold
+    volatile_mask = non_crisis_mask & (metrics_df["volatility"] > volatile_threshold)
+    metrics_df.loc[volatile_mask, "label"] = "Volatile"
+
+    print("Labeling complete.")
+
+    # --- Final Report ---
+    print("\n--- Labeling Results ---")
+    print("Final Label Distribution:")
+    print(
+        metrics_df["label"].value_counts(normalize=True).mul(100).round(1).astype(str)
+        + "%"
+    )
+
+    # --- Step 3: Create Final One-Hot Encoded List ---
+    # As you specified:
+    # [1,0,0] = Normal
+    # [0,1,0] = Crisis
+    # [0,0,1] = Volatile
+    print("\nStep 3: Creating final one-hot encoded list...")
+
+    # Using floats (e.g., 1.0) is good practice for ML inputs
+    label_map = {
+        "Normal": [1.0, 0.0, 0.0],
+        "Crisis": [0.0, 1.0, 0.0],
+        "Volatile": [0.0, 0.0, 1.0],
+    }
+
+    # Use the 'label' column from the DataFrame to create the list
+    # This maintains the exact 1-to-1 correspondence with 'ori_data'
+    ori_data_s = [label_map[label] for label in metrics_df["label"]]
+
+    print(f"Finished. 'ori_data_s' is a list of length {len(ori_data_s)}.")
+
+    return ori_data_s, metrics_df
