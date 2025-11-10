@@ -1,4 +1,13 @@
 import tensorflow as tf
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    RNN,
+    Concatenate,
+    RepeatVector,
+    Lambda,
+)
+from tensorflow.keras.models import Model
 import numpy as np
 
 from utils import extract_time, rnn_cell, random_generator, batch_generator
@@ -8,7 +17,7 @@ from utils import extract_time, rnn_cell, random_generator, batch_generator
 def MinMaxScaler(data):
     """Min-Max Normalizer.
     Args:
-      - data: raw data
+      - data: raw data (can be 2D for static, 3D for temporal)
     Returns:
       - norm_data: normalized data
       - min_val: minimum values (for renormalization)
@@ -17,169 +26,228 @@ def MinMaxScaler(data):
     if isinstance(data, list):
         data = np.asarray(data)
 
-    min_val = np.min(np.min(data, axis=0), axis=0)
-    data = data - min_val
-
-    max_val = np.max(np.max(data, axis=0), axis=0)
-    norm_data = data / (max_val + 1e-7)
+    if data.ndim == 3:
+        # Temporal data (samples, seq_len, features)
+        min_val = np.min(np.min(data, axis=0), axis=0)
+        data = data - min_val
+        max_val = np.max(np.max(data, axis=0), axis=0)
+        norm_data = data / (max_val + 1e-7)
+    elif data.ndim == 2:
+        # Static data (samples, features)
+        min_val = np.min(data, axis=0)
+        data = data - min_val
+        max_val = np.max(data, axis=0)
+        norm_data = data / (max_val + 1e-7)
+    else:
+        raise ValueError("Data must be 2D (static) or 3D (temporal)")
 
     return norm_data, min_val, max_val
 
 
-# --- Keras Model Definitions (Replaces tf.variable_scope) ---
-# Stacks RNN layers in a loop, which is the correct and robust way to build a MultiRNN in TF 2.x.
+# --- Keras Model Definitions ---
 
 
-def build_embedder(max_seq_len, dim, hidden_dim, num_layers, module_name):
+def build_embedder(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_name):
     """Builds the Embedder Keras Model."""
-    X_input = tf.keras.Input(shape=(max_seq_len, dim), name="X_input")
-    T_input = tf.keras.Input(shape=(), dtype=tf.int32, name="T_input")
+    X_S_input = Input(shape=(dim_s,), name="S_input")
+    X_T_input = Input(shape=(max_seq_len, dim_x), name="X_input")
+    T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = tf.keras.layers.Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(
-        T_input
-    )
+    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
 
-    # Stack RNN layers in a loop
-    x = X_input
+    # Static Embedder (e_S)
+    H_S = Dense(hidden_dim, activation="sigmoid", name="Embedder_S_Dense")(X_S_input)
+
+    # Temporal Embedder (e_X)
+    # Condition the temporal embedder on the static latent code H_S
+    H_S_repeated = RepeatVector(max_seq_len)(H_S)
+    C_X = Concatenate(axis=-1, name="Embedder_X_Concat")([X_T_input, H_S_repeated])
+
+    x = C_X
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
+        x = RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
 
-    H = tf.keras.layers.Dense(hidden_dim, activation="sigmoid", name="Embedder_Dense")(
-        e_outputs
-    )
+    # Apply final Dense projection + sigmoid as in the original code
+    H_T = Dense(hidden_dim, activation="sigmoid", name="Embedder_T_Dense")(e_outputs)
 
-    return tf.keras.Model(inputs=[X_input, T_input], outputs=H, name="embedder")
+    H = [H_S, H_T]
+
+    return Model(inputs=[X_S_input, X_T_input, T_input], outputs=H, name="embedder")
 
 
-def build_recovery(max_seq_len, dim, hidden_dim, num_layers, module_name):
+def build_recovery(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_name):
     """Builds the Recovery Keras Model."""
-    H_input = tf.keras.Input(shape=(max_seq_len, hidden_dim), name="H_input")
-    T_input = tf.keras.Input(shape=(), dtype=tf.int32, name="T_input")
+    H_S_input = Input(shape=(hidden_dim,), name="H_S_input")
+    H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input")
+    T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = tf.keras.layers.Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(
-        T_input
-    )
+    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
 
-    x = H_input
+    # Static Recovery (r_S)
+    X_S_tilde = Dense(dim_s, activation="sigmoid", name="Recovery_S_Dense")(H_S_input)
+
+    # Temporal Recovery (r_X)
+    x = H_T_input
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
+        x = RNN(cell, return_sequences=True)(x, mask=mask)
     r_outputs = x
 
-    X_tilde = tf.keras.layers.Dense(dim, activation="sigmoid", name="Recovery_Dense")(
-        r_outputs
+    X_T_tilde = Dense(dim_x, activation="sigmoid", name="Recovery_X_Dense")(r_outputs)
+
+    X_tilde = [X_S_tilde, X_T_tilde]
+
+    return Model(
+        inputs=[H_S_input, H_T_input, T_input], outputs=X_tilde, name="recovery"
     )
 
-    return tf.keras.Model(inputs=[H_input, T_input], outputs=X_tilde, name="recovery")
 
-
-def build_generator(max_seq_len, z_dim, hidden_dim, num_layers, module_name):
+def build_generator(max_seq_len, z_dim_s, z_dim_x, hidden_dim, num_layers, module_name):
     """Builds the Generator Keras Model."""
-    Z_input = tf.keras.Input(shape=(max_seq_len, z_dim), name="Z_input")
-    T_input = tf.keras.Input(shape=(), dtype=tf.int32, name="T_input")
+    Z_S_input = Input(shape=(z_dim_s,), name="Z_S_input")
+    Z_T_input = Input(shape=(max_seq_len, z_dim_x), name="Z_T_input")
+    T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = tf.keras.layers.Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(
-        T_input
+    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+
+    # Static Generator (g_S)
+    E_S_hat = Dense(hidden_dim, activation="sigmoid", name="Generator_S_Dense")(
+        Z_S_input
     )
 
-    x = Z_input
+    # Temporal Generator (g_X)
+    # Condition the temporal generator on the static latent code H_S_hat
+    E_S_hat_repeated = RepeatVector(max_seq_len)(E_S_hat)
+    C_Z = Concatenate(axis=-1, name="Generator_X_Concat")([Z_T_input, E_S_hat_repeated])
+
+    x = C_Z
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
-    e_outputs = x
+        x = RNN(cell, return_sequences=True)(x, mask=mask)
+    e_outputs = x  # This is the output from the RNN stack
 
-    E = tf.keras.layers.Dense(hidden_dim, activation="sigmoid", name="Generator_Dense")(
-        e_outputs
+    # Apply final Dense projection + sigmoid
+    E_T_hat = tf.keras.layers.Dense(
+        hidden_dim, activation="sigmoid", name="Generator_T_Dense"
+    )(e_outputs)
+
+    E_hat = [E_S_hat, E_T_hat]
+
+    return Model(
+        inputs=[Z_S_input, Z_T_input, T_input], outputs=E_hat, name="generator"
     )
-
-    return tf.keras.Model(inputs=[Z_input, T_input], outputs=E, name="generator")
 
 
 def build_supervisor(max_seq_len, hidden_dim, num_layers, module_name):
     """Builds the Supervisor Keras Model."""
-    H_input = tf.keras.Input(shape=(max_seq_len, hidden_dim), name="H_input_Sup")
-    T_input = tf.keras.Input(shape=(), dtype=tf.int32, name="T_input_Sup")
+    H_S_input = Input(shape=(hidden_dim,), name="H_S_input_Sup")
+    H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input_Sup")
+    T_input = Input(shape=(), dtype=tf.int32, name="T_input_Sup")
 
-    mask = tf.keras.layers.Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(
-        T_input
-    )
+    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
 
-    # Ensure at least one layer, num_layers >= 2
+    # Condition the supervisor on the static latent code H_S
+    H_S_repeated = RepeatVector(max_seq_len)(H_S_input)
+    C_H = Concatenate(axis=-1, name="Supervisor_Concat")([H_T_input, H_S_repeated])
+
     num_supervisor_layers = max(1, num_layers - 1)
-
-    x = H_input
+    x = C_H
     for _ in range(num_supervisor_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
+        x = RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
 
-    S = tf.keras.layers.Dense(
-        hidden_dim, activation="sigmoid", name="Supervisor_Dense"
-    )(e_outputs)
+    S = Dense(hidden_dim, activation="sigmoid", name="Supervisor_Dense")(e_outputs)
 
-    return tf.keras.Model(inputs=[H_input, T_input], outputs=S, name="supervisor")
+    return Model(inputs=[H_S_input, H_T_input, T_input], outputs=S, name="supervisor")
 
 
 def build_discriminator(max_seq_len, hidden_dim, num_layers, module_name):
     """Builds the Discriminator Keras Model."""
-    H_input = tf.keras.Input(shape=(max_seq_len, hidden_dim), name="H_input_Disc")
-    T_input = tf.keras.Input(shape=(), dtype=tf.int32, name="T_input_Disc")
+    H_S_input = Input(shape=(hidden_dim,), name="H_S_input_Disc")
+    H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input_Disc")
+    T_input = Input(shape=(), dtype=tf.int32, name="T_input_Disc")
 
-    mask = tf.keras.layers.Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(
-        T_input
-    )
+    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
 
-    x = H_input
+    # Static Discriminator (d_S)
+    Y_S_hat = Dense(1, activation=None, name="Discriminator_S_Dense")(H_S_input)
+
+    # Temporal Discriminator (d_X)
+    # Condition the temporal discriminator on the static latent code H_S
+    H_S_repeated = RepeatVector(max_seq_len)(H_S_input)
+    C_H = Concatenate(axis=-1, name="Discriminator_X_Concat")([H_T_input, H_S_repeated])
+
+    x = C_H
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = tf.keras.layers.RNN(cell, return_sequences=True)(x, mask=mask)
+        x = RNN(cell, return_sequences=True)(x, mask=mask)
     d_outputs = x
 
-    Y_hat = tf.keras.layers.Dense(1, activation=None, name="Discriminator_Dense")(
-        d_outputs
+    Y_T_hat = Dense(1, activation=None, name="Discriminator_X_Dense")(d_outputs)
+
+    Y_hat = [Y_S_hat, Y_T_hat]
+
+    return Model(
+        inputs=[H_S_input, H_T_input, T_input], outputs=Y_hat, name="discriminator"
     )
 
-    return tf.keras.Model(
-        inputs=[H_input, T_input], outputs=Y_hat, name="discriminator"
-    )
 
-
-def timegan(ori_data, parameters):
+def timegan(ori_data_s, ori_data_x, parameters):
     """TimeGAN function (TensorFlow 2.x implementation).
 
     Args:
-      - ori_data: original time-series data
+      - ori_data_s: original static time-series data
+      - ori_data_x: original temporal time-series data
       - parameters: TimeGAN network parameters
 
     Returns:
-      - generated_data: generated time-series data
+      - generated_data_s: generated static time-series data
+      - generated_data_x: generated temporal time-series data
     """
 
-    if isinstance(ori_data, list):
-        ori_data = np.asarray(ori_data)
+    if isinstance(ori_data_s, list):
+        ori_data_s = np.asarray(ori_data_s)
+    if isinstance(ori_data_x, list):
+        ori_data_x = np.asarray(ori_data_x)
 
-    no, seq_len, dim = ori_data.shape
-    ori_time, max_seq_len = extract_time(ori_data)
-    ori_data, min_val, max_val = MinMaxScaler(ori_data)
+    # Data parameters
+    no, seq_len, dim_x = ori_data_x.shape
+    dim_s = ori_data_s.shape[1]
+    ori_time, max_seq_len = extract_time(ori_data_x)
 
+    # Normalize data
+    ori_data_s, min_val_s, max_val_s = MinMaxScaler(ori_data_s)
+    ori_data_x, min_val_x, max_val_x = MinMaxScaler(ori_data_x)
+
+    # Network parameters
     hidden_dim = parameters["hidden_dim"]
     num_layers = parameters["num_layer"]
     iterations = parameters["iterations"]
     batch_size = parameters["batch_size"]
     module_name = parameters["module"]
-    z_dim = dim
+    z_dim_s = dim_s  # Use static feature dim for static z_dim
+    z_dim_x = dim_x  # Use temporal feature dim for temporal z_dim
     gamma = 1
 
-    embedder = build_embedder(max_seq_len, dim, hidden_dim, num_layers, module_name)
-    recovery = build_recovery(max_seq_len, dim, hidden_dim, num_layers, module_name)
-    generator = build_generator(max_seq_len, z_dim, hidden_dim, num_layers, module_name)
+    # Build Models
+    embedder = build_embedder(
+        max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_name
+    )
+    recovery = build_recovery(
+        max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_name
+    )
+    generator = build_generator(
+        max_seq_len, z_dim_s, z_dim_x, hidden_dim, num_layers, module_name
+    )
     supervisor = build_supervisor(max_seq_len, hidden_dim, num_layers, module_name)
     discriminator = build_discriminator(
         max_seq_len, hidden_dim, num_layers, module_name
     )
 
+    # Loss & Optimizers
     bce = tf.keras.losses.BinaryCrossentropy(from_logits=True)
     mse = tf.keras.losses.MeanSquaredError()
 
@@ -189,11 +257,14 @@ def timegan(ori_data, parameters):
     GS_optimizer = tf.keras.optimizers.Adam()
 
     @tf.function
-    def train_step_embedder(X_mb, T_mb):
+    def train_step_embedder(S_mb, X_mb, T_mb):
         with tf.GradientTape() as tape:
-            H = embedder([X_mb, T_mb], training=True)
-            X_tilde = recovery([H, T_mb], training=True)
-            E_loss_T0 = mse(X_mb, X_tilde)
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            [X_S_tilde, X_T_tilde] = recovery([H_S, H_T, T_mb], training=True)
+
+            E_loss_S = mse(S_mb, X_S_tilde)
+            E_loss_T = mse(X_mb, X_T_tilde)
+            E_loss_T0 = E_loss_S + E_loss_T
             E_loss0 = 10 * tf.sqrt(E_loss_T0)
 
         vars_e = embedder.trainable_variables + recovery.trainable_variables
@@ -202,11 +273,12 @@ def timegan(ori_data, parameters):
         return E_loss_T0
 
     @tf.function
-    def train_step_supervisor(X_mb, T_mb):
+    def train_step_supervisor(S_mb, X_mb, T_mb):
         with tf.GradientTape() as tape:
-            H = embedder([X_mb, T_mb], training=True)
-            H_hat_supervise = supervisor([H, T_mb], training=True)
-            G_loss_S = mse(H[:, 1:, :], H_hat_supervise[:, :-1, :])
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            H_hat_supervise = supervisor([H_S, H_T, T_mb], training=True)
+            # Supervised loss is only on temporal dynamics
+            G_loss_S = mse(H_T[:, 1:, :], H_hat_supervise[:, :-1, :])
 
         vars_gs = generator.trainable_variables + supervisor.trainable_variables
         gradients = tape.gradient(G_loss_S, vars_gs)
@@ -214,35 +286,68 @@ def timegan(ori_data, parameters):
         return G_loss_S
 
     @tf.function
-    def train_step_joint(X_mb, T_mb, Z_mb):
+    def train_step_joint(S_mb, X_mb, T_mb, Z_S_mb, Z_T_mb):
         # --- Generator Training Twice---
         with tf.GradientTape() as g_tape:
-            H = embedder([X_mb, T_mb], training=True)
-            E_hat = generator([Z_mb, T_mb], training=True)
-            H_hat = supervisor([E_hat, T_mb], training=True)
-            X_hat = recovery([H_hat, T_mb], training=True)
+            # Embed real data
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            # Generate fake latents
+            [E_S_hat, E_T_hat] = generator([Z_S_mb, Z_T_mb, T_mb], training=True)
+            # Supervise fake latents
+            H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb], training=True)
+            # Reconstruct fake data
+            [X_S_hat, X_T_hat] = recovery([E_S_hat, H_T_hat, T_mb], training=True)
 
-            Y_fake = discriminator([H_hat, T_mb], training=False)
-            Y_real = discriminator([H, T_mb], training=False)
-            Y_fake_e = discriminator([E_hat, T_mb], training=False)
+            # Discriminate
+            [Y_S_fake, Y_T_fake] = discriminator(
+                [E_S_hat, H_T_hat, T_mb], training=False
+            )
+            [Y_S_fake_e, Y_T_fake_e] = discriminator(
+                [E_S_hat, E_T_hat, T_mb], training=False
+            )
 
-            G_loss_U = bce(tf.ones_like(Y_fake), Y_fake)
-            G_loss_U_e = bce(tf.ones_like(Y_fake_e), Y_fake_e)
+            # --- G_loss ---
+            # 1. Adversarial Loss
+            G_loss_U_S = bce(tf.ones_like(Y_S_fake), Y_S_fake)
+            G_loss_U_T = bce(tf.ones_like(Y_T_fake), Y_T_fake)
+            G_loss_U = G_loss_U_S + G_loss_U_T
 
-            H_hat_supervise = supervisor([H, T_mb], training=True)
-            G_loss_S = mse(H[:, 1:, :], H_hat_supervise[:, :-1, :])
+            G_loss_U_e_S = bce(tf.ones_like(Y_S_fake_e), Y_S_fake_e)
+            G_loss_U_e_T = bce(tf.ones_like(Y_T_fake_e), Y_T_fake_e)
+            G_loss_U_e = G_loss_U_e_S + G_loss_U_e_T
 
-            G_loss_V1 = tf.reduce_mean(
+            # 2. Supervised Loss
+            H_hat_supervise = supervisor([H_S, H_T, T_mb], training=True)
+            G_loss_S = mse(H_T[:, 1:, :], H_hat_supervise[:, :-1, :])
+
+            # 3. Moment Loss
+            G_loss_V_S1 = tf.reduce_mean(
                 tf.abs(
-                    tf.sqrt(tf.nn.moments(X_hat, [0])[1] + 1e-6)
-                    - tf.sqrt(tf.nn.moments(X_mb, [0])[1] + 1e-6)
+                    tf.sqrt(tf.nn.moments(X_S_hat, [0])[1] + 1e-6)
+                    - tf.sqrt(tf.nn.moments(S_mb, [0])[1] + 1e-6)
                 )
             )
-            G_loss_V2 = tf.reduce_mean(
-                tf.abs((tf.nn.moments(X_hat, [0])[0]) - (tf.nn.moments(X_mb, [0])[0]))
+            G_loss_V_S2 = tf.reduce_mean(
+                tf.abs((tf.nn.moments(X_S_hat, [0])[0]) - (tf.nn.moments(S_mb, [0])[0]))
             )
-            G_loss_V = G_loss_V1 + G_loss_V2
+            G_loss_V_S = G_loss_V_S1 + G_loss_V_S2
 
+            G_loss_V_T1 = tf.reduce_mean(
+                tf.abs(
+                    tf.sqrt(tf.nn.moments(X_T_hat, [0, 1])[1] + 1e-6)
+                    - tf.sqrt(tf.nn.moments(X_mb, [0, 1])[1] + 1e-6)
+                )
+            )
+            G_loss_V_T2 = tf.reduce_mean(
+                tf.abs(
+                    (tf.nn.moments(X_T_hat, [0, 1])[0])
+                    - (tf.nn.moments(X_mb, [0, 1])[0])
+                )
+            )
+            G_loss_V_T = G_loss_V_T1 + G_loss_V_T2
+            G_loss_V = G_loss_V_S + G_loss_V_T
+
+            # Total G_loss
             G_loss = (
                 G_loss_U + gamma * G_loss_U_e + 100 * tf.sqrt(G_loss_S) + 100 * G_loss_V
             )
@@ -251,33 +356,52 @@ def timegan(ori_data, parameters):
         gradients_g = g_tape.gradient(G_loss, vars_g)
         G_optimizer.apply_gradients(zip(gradients_g, vars_g))
 
+        # --- Generator Training Again ---
+        # (This is a repeat from the original code, kept for consistency)
         with tf.GradientTape() as g_tape:
-            H = embedder([X_mb, T_mb], training=True)
-            E_hat = generator([Z_mb, T_mb], training=True)
-            H_hat = supervisor([E_hat, T_mb], training=True)
-            X_hat = recovery([H_hat, T_mb], training=True)
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            [E_S_hat, E_T_hat] = generator([Z_S_mb, Z_T_mb, T_mb], training=True)
+            H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb], training=True)
+            [X_S_hat, X_T_hat] = recovery([E_S_hat, H_T_hat, T_mb], training=True)
+            [Y_S_fake, Y_T_fake] = discriminator(
+                [E_S_hat, H_T_hat, T_mb], training=False
+            )
+            [Y_S_fake_e, Y_T_fake_e] = discriminator(
+                [E_S_hat, E_T_hat, T_mb], training=False
+            )
 
-            Y_fake = discriminator([H_hat, T_mb], training=False)
-            Y_real = discriminator([H, T_mb], training=False)
-            Y_fake_e = discriminator([E_hat, T_mb], training=False)
-
-            G_loss_U = bce(tf.ones_like(Y_fake), Y_fake)
-            G_loss_U_e = bce(tf.ones_like(Y_fake_e), Y_fake_e)
-
-            H_hat_supervise = supervisor([H, T_mb], training=True)
-            G_loss_S = mse(H[:, 1:, :], H_hat_supervise[:, :-1, :])
-
-            G_loss_V1 = tf.reduce_mean(
+            G_loss_U_S = bce(tf.ones_like(Y_S_fake), Y_S_fake)
+            G_loss_U_T = bce(tf.ones_like(Y_T_fake), Y_T_fake)
+            G_loss_U = G_loss_U_S + G_loss_U_T
+            G_loss_U_e_S = bce(tf.ones_like(Y_S_fake_e), Y_S_fake_e)
+            G_loss_U_e_T = bce(tf.ones_like(Y_T_fake_e), Y_T_fake_e)
+            G_loss_U_e = G_loss_U_e_S + G_loss_U_e_T
+            H_hat_supervise = supervisor([H_S, H_T, T_mb], training=True)
+            G_loss_S = mse(H_T[:, 1:, :], H_hat_supervise[:, :-1, :])
+            G_loss_V_S1 = tf.reduce_mean(
                 tf.abs(
-                    tf.sqrt(tf.nn.moments(X_hat, [0])[1] + 1e-6)
-                    - tf.sqrt(tf.nn.moments(X_mb, [0])[1] + 1e-6)
+                    tf.sqrt(tf.nn.moments(X_S_hat, [0])[1] + 1e-6)
+                    - tf.sqrt(tf.nn.moments(S_mb, [0])[1] + 1e-6)
                 )
             )
-            G_loss_V2 = tf.reduce_mean(
-                tf.abs((tf.nn.moments(X_hat, [0])[0]) - (tf.nn.moments(X_mb, [0])[0]))
+            G_loss_V_S2 = tf.reduce_mean(
+                tf.abs((tf.nn.moments(X_S_hat, [0])[0]) - (tf.nn.moments(S_mb, [0])[0]))
             )
-            G_loss_V = G_loss_V1 + G_loss_V2
-
+            G_loss_V_S = G_loss_V_S1 + G_loss_V_S2
+            G_loss_V_T1 = tf.reduce_mean(
+                tf.abs(
+                    tf.sqrt(tf.nn.moments(X_T_hat, [0, 1])[1] + 1e-6)
+                    - tf.sqrt(tf.nn.moments(X_mb, [0, 1])[1] + 1e-6)
+                )
+            )
+            G_loss_V_T2 = tf.reduce_mean(
+                tf.abs(
+                    (tf.nn.moments(X_T_hat, [0, 1])[0])
+                    - (tf.nn.moments(X_mb, [0, 1])[0])
+                )
+            )
+            G_loss_V_T = G_loss_V_T1 + G_loss_V_T2
+            G_loss_V = G_loss_V_S + G_loss_V_T
             G_loss = (
                 G_loss_U + gamma * G_loss_U_e + 100 * tf.sqrt(G_loss_S) + 100 * G_loss_V
             )
@@ -288,16 +412,14 @@ def timegan(ori_data, parameters):
 
         # --- Embedder Training Twice---
         with tf.GradientTape() as e_tape:
-            H = embedder([X_mb, T_mb], training=True)
-            X_tilde = recovery([H, T_mb], training=True)
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            [S_tilde, X_tilde] = recovery([H_S, H_T, T_mb], training=True)
+            H_hat_supervise = supervisor([H_S, H_T, T_mb], training=True)
 
-            H_hat_supervise = supervisor([H, T_mb], training=True)
-            G_loss_S_e = mse(
-                H[:, 1:, :], H_hat_supervise[:, :-1, :]
-            )  # Use a different name
-
-            E_loss_T0 = mse(X_mb, X_tilde)
-
+            G_loss_S_e = mse(H_T[:, 1:, :], H_hat_supervise[:, :-1, :])
+            E_loss_S = mse(S_mb, S_tilde)
+            E_loss_T = mse(X_mb, X_tilde)
+            E_loss_T0 = E_loss_S + E_loss_T
             E_loss0 = 10 * tf.sqrt(E_loss_T0)
             E_loss = E_loss0 + 0.1 * G_loss_S_e
 
@@ -306,16 +428,14 @@ def timegan(ori_data, parameters):
         E_optimizer.apply_gradients(zip(gradients_e, vars_e))
 
         with tf.GradientTape() as e_tape:
-            H = embedder([X_mb, T_mb], training=True)
-            X_tilde = recovery([H, T_mb], training=True)
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
+            [S_tilde, X_tilde] = recovery([H_S, H_T, T_mb], training=True)
+            H_hat_supervise = supervisor([H_S, H_T, T_mb], training=True)
 
-            H_hat_supervise = supervisor([H, T_mb], training=True)
-            G_loss_S_e = mse(
-                H[:, 1:, :], H_hat_supervise[:, :-1, :]
-            )  # Use a different name
-
-            E_loss_T0 = mse(X_mb, X_tilde)
-
+            G_loss_S_e = mse(H_T[:, 1:, :], H_hat_supervise[:, :-1, :])
+            E_loss_S = mse(S_mb, S_tilde)
+            E_loss_T = mse(X_mb, X_tilde)
+            E_loss_T0 = E_loss_S + E_loss_T
             E_loss0 = 10 * tf.sqrt(E_loss_T0)
             E_loss = E_loss0 + 0.1 * G_loss_S_e
 
@@ -325,17 +445,27 @@ def timegan(ori_data, parameters):
 
         # --- Discriminator Training Once---
         with tf.GradientTape() as d_tape:
-            H = embedder([X_mb, T_mb], training=False)
-            E_hat = generator([Z_mb, T_mb], training=False)
-            H_hat = supervisor([E_hat, T_mb], training=False)
+            [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=False)
+            [E_S_hat, E_T_hat] = generator([Z_S_mb, Z_T_mb, T_mb], training=False)
+            H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb], training=False)
 
-            Y_fake = discriminator([H_hat, T_mb], training=True)
-            Y_real = discriminator([H, T_mb], training=True)
-            Y_fake_e = discriminator([E_hat, T_mb], training=True)
+            [Y_S_fake, Y_T_fake] = discriminator(
+                [E_S_hat, H_T_hat, T_mb], training=True
+            )
+            [Y_S_real, Y_T_real] = discriminator([H_S, H_T, T_mb], training=True)
+            [Y_S_fake_e, Y_T_fake_e] = discriminator(
+                [E_S_hat, E_T_hat, T_mb], training=True
+            )
 
-            D_loss_real = bce(tf.ones_like(Y_real), Y_real)
-            D_loss_fake = bce(tf.zeros_like(Y_fake), Y_fake)
-            D_loss_fake_e = bce(tf.zeros_like(Y_fake_e), Y_fake_e)
+            D_loss_real = bce(tf.ones_like(Y_S_real), Y_S_real) + bce(
+                tf.ones_like(Y_T_real), Y_T_real
+            )
+            D_loss_fake = bce(tf.zeros_like(Y_S_fake), Y_S_fake) + bce(
+                tf.zeros_like(Y_T_fake), Y_T_fake
+            )
+            D_loss_fake_e = bce(tf.zeros_like(Y_S_fake_e), Y_S_fake_e) + bce(
+                tf.zeros_like(Y_T_fake_e), Y_T_fake_e
+            )
             D_loss = D_loss_real + D_loss_fake + gamma * D_loss_fake_e
 
         if D_loss > 0.15:
@@ -348,10 +478,12 @@ def timegan(ori_data, parameters):
     # 1. Embedding network training
     print("Start Embedding Network Training")
     for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
+        S_mb, X_mb, T_mb = batch_generator(ori_data_s, ori_data_x, ori_time, batch_size)
+        S_mb_t = tf.convert_to_tensor(S_mb, dtype=tf.float32)
         X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
         T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
-        step_e_loss = train_step_embedder(X_mb_t, T_mb_t)
+
+        step_e_loss = train_step_embedder(S_mb_t, X_mb_t, T_mb_t)
         if itt % 1000 == 0:
             print(
                 f"step: {itt}/{iterations}, e_loss: {np.round(np.sqrt(step_e_loss), 4)}"
@@ -362,10 +494,12 @@ def timegan(ori_data, parameters):
     # 2. Training only with supervised loss
     print("Start Training with Supervised Loss Only")
     for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
+        S_mb, X_mb, T_mb = batch_generator(ori_data_s, ori_data_x, ori_time, batch_size)
+        S_mb_t = tf.convert_to_tensor(S_mb, dtype=tf.float32)
         X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
         T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
-        step_g_loss_s = train_step_supervisor(X_mb_t, T_mb_t)
+
+        step_g_loss_s = train_step_supervisor(S_mb_t, X_mb_t, T_mb_t)
         if itt % 1000 == 0:
             print(
                 f"step: {itt}/{iterations}, s_loss: {np.round(np.sqrt(step_g_loss_s), 4)}"
@@ -375,16 +509,21 @@ def timegan(ori_data, parameters):
 
     # 3. Joint Training
     print("Start Joint Training")
-    step_d_loss = 0.0  # Initialize in case d_loss isn't run
+    step_d_loss = 0.0
     for itt in range(iterations):
-        X_mb, T_mb = batch_generator(ori_data, ori_time, batch_size)
-        Z_mb = random_generator(batch_size, z_dim, T_mb, max_seq_len)
+        S_mb, X_mb, T_mb = batch_generator(ori_data_s, ori_data_x, ori_time, batch_size)
+        Z_S_mb, Z_T_mb = random_generator(
+            batch_size, z_dim_s, z_dim_x, T_mb, max_seq_len
+        )
+
+        S_mb_t = tf.convert_to_tensor(S_mb, dtype=tf.float32)
         X_mb_t = tf.convert_to_tensor(X_mb, dtype=tf.float32)
         T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
-        Z_mb_t = tf.convert_to_tensor(Z_mb, dtype=tf.float32)
+        Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)
+        Z_T_mb_t = tf.convert_to_tensor(Z_T_mb, dtype=tf.float32)
 
         step_d_loss, step_g_loss_u, step_g_loss_s, step_g_loss_v, step_e_loss_t0 = (
-            train_step_joint(X_mb_t, T_mb_t, Z_mb_t)
+            train_step_joint(S_mb_t, X_mb_t, T_mb_t, Z_S_mb_t, Z_T_mb_t)
         )
 
         if itt % 1000 == 0 or itt == iterations - 1:
@@ -399,24 +538,91 @@ def timegan(ori_data, parameters):
 
     print("Finish Joint Training")
 
-    ## Synthetic data generation
-    Z_mb = random_generator(no, z_dim, ori_time, max_seq_len)
-    Z_mb_t = tf.convert_to_tensor(Z_mb, dtype=tf.float32)
-    T_mb_t = tf.convert_to_tensor(ori_time, dtype=tf.int32)
+    # --- START OF MODIFIED SECTION ---
 
-    E_hat = generator([Z_mb_t, T_mb_t], training=False)
-    H_hat = supervisor([E_hat, T_mb_t], training=False)
-    generated_data_curr = recovery([H_hat, T_mb_t], training=False)
+    ## Synthetic data generation (Targeted)
+    print("Start Targeted Synthetic Data Generation")
+    target_count = 2000
+    # Use indices for classes: 0 = normal, 1 = crisis, 2 = volatile
+    class_counts = {0: 0, 1: 0, 2: 0}
 
-    generated_data_curr = generated_data_curr.numpy()
+    # Collectors for the final data
+    all_generated_s = {0: [], 1: [], 2: []}
+    all_generated_x = {0: [], 1: [], 2: []}
 
-    generated_data = list()
-    for i in range(no):
-        temp = generated_data_curr[i, : ori_time[i], :]
-        generated_data.append(temp)
+    gen_batch_size = batch_size  # Use the same batch size as training
 
-    generated_data = np.asarray(generated_data, dtype=object)
-    generated_data = generated_data * max_val
-    generated_data = generated_data + min_val
+    while not all(c >= target_count for c in class_counts.values()):
+        # 1. Generate a batch of random noise and times
+        # Sample time lengths from the original data's time distribution
+        T_mb_idx = np.random.choice(len(ori_time), gen_batch_size)
+        T_mb = [ori_time[i] for i in T_mb_idx]
+        T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
 
-    return list(generated_data)
+        Z_S_mb, Z_T_mb = random_generator(
+            gen_batch_size, z_dim_s, z_dim_x, T_mb, max_seq_len
+        )
+        Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)
+        Z_T_mb_t = tf.convert_to_tensor(Z_T_mb, dtype=tf.float32)
+
+        # 2. Generate data from noise
+        [E_S_hat, E_T_hat] = generator([Z_S_mb_t, Z_T_mb_t, T_mb_t], training=False)
+        H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb_t], training=False)
+        [X_S_hat, X_T_hat_curr] = recovery([E_S_hat, H_T_hat, T_mb_t], training=False)
+
+        # 3. Get numpy arrays and renormalize
+        batch_s_norm = X_S_hat.numpy()
+        batch_x_norm = X_T_hat_curr.numpy()
+
+        # Renormalize static data *before* classification
+        batch_s_renorm = batch_s_norm * (max_val_s + 1e-7) + min_val_s
+
+        # 4. Classify, filter, and store
+        for i in range(gen_batch_size):
+            # Get the generated static vector (which is renormalized)
+            s_vec = batch_s_renorm[i]
+
+            # Find the generated class by finding the index of the max value
+            # (e.g., [0.8, 0.1, 0.1] -> index 0 -> class 'normal')
+            gen_class = np.argmax(s_vec)
+
+            # Check if this class still needs more samples
+            if class_counts[gen_class] < target_count:
+                # Add to count
+                class_counts[gen_class] += 1
+
+                # Store the static vector
+                all_generated_s[gen_class].append(s_vec)
+
+                # Process and store the temporal data
+                seq_len = T_mb[i]  # Get the actual length for this sample
+
+                # Slice the normalized temporal data to its actual length
+                temp_x_norm = batch_x_norm[i, :seq_len, :]
+
+                # Renormalize the sliced temporal data
+                temp_x_renorm = temp_x_norm * (max_val_x + 1e-7) + min_val_x
+
+                # Store the renormalized temporal data
+                all_generated_x[gen_class].append(temp_x_renorm)
+
+        # Print progress
+        print(
+            f"Generating... Counts: [Normal: {class_counts[0]}, Crisis: {class_counts[1]}, Volatile: {class_counts[2]}] / {target_count}",
+            end="\r",
+        )
+
+    print(f"\nFinish Targeted Synthetic Data Generation.         ")
+
+    # Combine the lists from all classes
+    final_generated_s = all_generated_s[0] + all_generated_s[1] + all_generated_s[2]
+    final_generated_x = all_generated_x[0] + all_generated_x[1] + all_generated_x[2]
+
+    # Note: The final list will contain 6000 samples, 2000 of each class,
+    # but their order might be mixed (e.g., not all 2000 normal first).
+    # If you need them ordered, you can return them separately.
+    # This implementation returns a single list of 6000 samples.
+
+    return list(final_generated_s), list(final_generated_x)
+
+    # --- END OF MODIFIED SECTION ---
