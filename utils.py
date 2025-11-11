@@ -215,3 +215,25 @@ def batch_generator(data_s, data_x, time, batch_size):
     T_mb = list(time[i] for i in train_idx)
 
     return S_mb, X_mb, T_mb
+
+
+def batch_generator1(data, time, batch_size):
+    """Mini-batch generator.
+
+    Args:
+      - data: time-series data
+      - time: time information
+      - batch_size: the number of samples in each batch
+
+    Returns:
+      - X_mb: time-series data in each batch
+      - T_mb: time information in each batch
+    """
+    no = len(data)
+    idx = np.random.default_rng().permutation(no)
+    train_idx = idx[:batch_size]
+
+    X_mb = list(data[i] for i in train_idx)
+    T_mb = list(time[i] for i in train_idx)
+
+    return X_mb, T_mb

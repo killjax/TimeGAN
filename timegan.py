@@ -538,91 +538,28 @@ def timegan(ori_data_s, ori_data_x, parameters):
 
     print("Finish Joint Training")
 
-    # --- START OF MODIFIED SECTION ---
+    ## Synthetic data generation
 
-    ## Synthetic data generation (Targeted)
-    print("Start Targeted Synthetic Data Generation")
-    target_count = 2000
-    # Use indices for classes: 0 = normal, 1 = crisis, 2 = volatile
-    class_counts = {0: 0, 1: 0, 2: 0}
+    Z_S_mb, Z_T_mb = random_generator(no, z_dim_s, z_dim_x, ori_time, max_seq_len)
+    Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)
+    Z_T_mb_t = tf.convert_to_tensor(Z_T_mb, dtype=tf.float32)
+    T_mb_t = tf.convert_to_tensor(ori_time, dtype=tf.int32)
 
-    # Collectors for the final data
-    all_generated_s = {0: [], 1: [], 2: []}
-    all_generated_x = {0: [], 1: [], 2: []}
+    [E_S_hat, E_T_hat] = generator([Z_S_mb_t, Z_T_mb_t, T_mb_t], training=False)
+    H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb_t], training=False)
+    [X_S_hat, X_T_hat_curr] = recovery([E_S_hat, H_T_hat, T_mb_t], training=False)
 
-    gen_batch_size = batch_size  # Use the same batch size as training
+    generated_data_s = X_S_hat.numpy()
+    generated_data_x_curr = X_T_hat_curr.numpy()
 
-    while not all(c >= target_count for c in class_counts.values()):
-        # 1. Generate a batch of random noise and times
-        # Sample time lengths from the original data's time distribution
-        T_mb_idx = np.random.choice(len(ori_time), gen_batch_size)
-        T_mb = [ori_time[i] for i in T_mb_idx]
-        T_mb_t = tf.convert_to_tensor(T_mb, dtype=tf.int32)
+    generated_data_x = list()
+    for i in range(no):
+        temp = generated_data_x_curr[i, : ori_time[i], :]
+        generated_data_x.append(temp)
 
-        Z_S_mb, Z_T_mb = random_generator(
-            gen_batch_size, z_dim_s, z_dim_x, T_mb, max_seq_len
-        )
-        Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)
-        Z_T_mb_t = tf.convert_to_tensor(Z_T_mb, dtype=tf.float32)
+    # Renormalize
+    generated_data_s = generated_data_s * (max_val_s + 1e-7) + min_val_s
+    generated_data_x = np.asarray(generated_data_x, dtype=object)
+    generated_data_x = generated_data_x * (max_val_x + 1e-7) + min_val_x
 
-        # 2. Generate data from noise
-        [E_S_hat, E_T_hat] = generator([Z_S_mb_t, Z_T_mb_t, T_mb_t], training=False)
-        H_T_hat = supervisor([E_S_hat, E_T_hat, T_mb_t], training=False)
-        [X_S_hat, X_T_hat_curr] = recovery([E_S_hat, H_T_hat, T_mb_t], training=False)
-
-        # 3. Get numpy arrays and renormalize
-        batch_s_norm = X_S_hat.numpy()
-        batch_x_norm = X_T_hat_curr.numpy()
-
-        # Renormalize static data *before* classification
-        batch_s_renorm = batch_s_norm * (max_val_s + 1e-7) + min_val_s
-
-        # 4. Classify, filter, and store
-        for i in range(gen_batch_size):
-            # Get the generated static vector (which is renormalized)
-            s_vec = batch_s_renorm[i]
-
-            # Find the generated class by finding the index of the max value
-            # (e.g., [0.8, 0.1, 0.1] -> index 0 -> class 'normal')
-            gen_class = np.argmax(s_vec)
-
-            # Check if this class still needs more samples
-            if class_counts[gen_class] < target_count:
-                # Add to count
-                class_counts[gen_class] += 1
-
-                # Store the static vector
-                all_generated_s[gen_class].append(s_vec)
-
-                # Process and store the temporal data
-                seq_len = T_mb[i]  # Get the actual length for this sample
-
-                # Slice the normalized temporal data to its actual length
-                temp_x_norm = batch_x_norm[i, :seq_len, :]
-
-                # Renormalize the sliced temporal data
-                temp_x_renorm = temp_x_norm * (max_val_x + 1e-7) + min_val_x
-
-                # Store the renormalized temporal data
-                all_generated_x[gen_class].append(temp_x_renorm)
-
-        # Print progress
-        print(
-            f"Generating... Counts: [Normal: {class_counts[0]}, Crisis: {class_counts[1]}, Volatile: {class_counts[2]}] / {target_count}",
-            end="\r",
-        )
-
-    print(f"\nFinish Targeted Synthetic Data Generation.         ")
-
-    # Combine the lists from all classes
-    final_generated_s = all_generated_s[0] + all_generated_s[1] + all_generated_s[2]
-    final_generated_x = all_generated_x[0] + all_generated_x[1] + all_generated_x[2]
-
-    # Note: The final list will contain 6000 samples, 2000 of each class,
-    # but their order might be mixed (e.g., not all 2000 normal first).
-    # If you need them ordered, you can return them separately.
-    # This implementation returns a single list of 6000 samples.
-
-    return list(final_generated_s), list(final_generated_x)
-
-    # --- END OF MODIFIED SECTION ---
+    return list(generated_data_s), list(generated_data_x)

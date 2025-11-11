@@ -23,7 +23,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, Model, optimizers
 import numpy as np
 from sklearn.metrics import accuracy_score
-from utils import train_test_divide, extract_time, batch_generator
+from utils import train_test_divide, extract_time, batch_generator1
 
 
 class Discriminator(Model):
@@ -132,11 +132,11 @@ def discriminative_score_metrics(ori_data, generated_data):
     # Training loop
     for itt in range(iterations):
         # Batch setting
-        X_mb_list, T_mb = batch_generator(train_x, train_t, batch_size)
-        X_hat_mb_list, T_hat_mb = batch_generator(train_x_hat, train_t_hat, batch_size)
+        X_mb_list, T_mb = batch_generator1(train_x, train_t, batch_size)
+        X_hat_mb_list, T_hat_mb = batch_generator1(train_x_hat, train_t_hat, batch_size)
 
-        # [FIXED BUG]: Pad the data from batch_generator to max_seq_len
-        # The `utils.batch_generator` returns a list of arrays of variable length
+        # [FIXED BUG]: Pad the data from batch_generator1 to max_seq_len
+        # The `utils.batch_generator1` returns a list of arrays of variable length
         # We must pad them to a consistent 3D array shape.
         X_mb = np.zeros([batch_size, max_seq_len, dim])
         for i in range(batch_size):
