@@ -1,4 +1,5 @@
 import tensorflow as tf
+import os
 from tensorflow.keras.layers import (
     Input,
     Dense,
@@ -10,7 +11,13 @@ from tensorflow.keras.layers import (
 from tensorflow.keras.models import Model
 import numpy as np
 
-from utils import extract_time, rnn_cell, random_generator, batch_generator
+from utils import (
+    extract_time,
+    rnn_cell,
+    random_generator,
+    batch_generator,
+    LayerNormLSTMCell,
+)
 
 
 # Helper function
@@ -45,6 +52,10 @@ def MinMaxScaler(data):
 
 
 # --- Keras Model Definitions ---
+def _sequence_mask_lambda(t, maxlen):
+    import tensorflow
+
+    return tensorflow.sequence_mask(t, maxlen=maxlen)
 
 
 def build_embedder(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_name):
@@ -53,7 +64,11 @@ def build_embedder(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_nam
     X_T_input = Input(shape=(max_seq_len, dim_x), name="X_input")
     T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+    mask = Lambda(
+        _sequence_mask_lambda,
+        arguments={"maxlen": max_seq_len},  # Pass max_seq_len as 'maxlen'
+        output_shape=(max_seq_len,),
+    )(T_input)
 
     # Static Embedder (e_S)
     H_S = Dense(hidden_dim, activation="sigmoid", name="Embedder_S_Dense")(X_S_input)
@@ -83,7 +98,11 @@ def build_recovery(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_nam
     H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input")
     T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+    mask = Lambda(
+        _sequence_mask_lambda,
+        arguments={"maxlen": max_seq_len},
+        output_shape=(max_seq_len,),
+    )(T_input)
 
     # Static Recovery (r_S)
     X_S_tilde = Dense(dim_s, activation="sigmoid", name="Recovery_S_Dense")(H_S_input)
@@ -110,7 +129,11 @@ def build_generator(max_seq_len, z_dim_s, z_dim_x, hidden_dim, num_layers, modul
     Z_T_input = Input(shape=(max_seq_len, z_dim_x), name="Z_T_input")
     T_input = Input(shape=(), dtype=tf.int32, name="T_input")
 
-    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+    mask = Lambda(
+        _sequence_mask_lambda,
+        arguments={"maxlen": max_seq_len},
+        output_shape=(max_seq_len,),
+    )(T_input)
 
     # Static Generator (g_S)
     E_S_hat = Dense(hidden_dim, activation="sigmoid", name="Generator_S_Dense")(
@@ -146,7 +169,11 @@ def build_supervisor(max_seq_len, hidden_dim, num_layers, module_name):
     H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input_Sup")
     T_input = Input(shape=(), dtype=tf.int32, name="T_input_Sup")
 
-    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+    mask = Lambda(
+        _sequence_mask_lambda,
+        arguments={"maxlen": max_seq_len},
+        output_shape=(max_seq_len,),
+    )(T_input)
 
     # Condition the supervisor on the static latent code H_S
     H_S_repeated = RepeatVector(max_seq_len)(H_S_input)
@@ -170,7 +197,11 @@ def build_discriminator(max_seq_len, hidden_dim, num_layers, module_name):
     H_T_input = Input(shape=(max_seq_len, hidden_dim), name="H_T_input_Disc")
     T_input = Input(shape=(), dtype=tf.int32, name="T_input_Disc")
 
-    mask = Lambda(lambda t: tf.sequence_mask(t, maxlen=max_seq_len))(T_input)
+    mask = Lambda(
+        _sequence_mask_lambda,
+        arguments={"maxlen": max_seq_len},
+        output_shape=(max_seq_len,),
+    )(T_input)
 
     # Static Discriminator (d_S)
     Y_S_hat = Dense(1, activation=None, name="Discriminator_S_Dense")(H_S_input)
@@ -538,8 +569,113 @@ def timegan(ori_data_s, ori_data_x, parameters):
 
     print("Finish Joint Training")
 
-    ## Synthetic data generation
+    # ------------------------------------------------------------------
+    # --- SAVE TRAINED MODELS AND SCALERS ---
+    # ------------------------------------------------------------------
+    print("Saving trained models and scalers...")
 
+    # Define file paths
+    save_dir = "saved_models"
+    os.makedirs(save_dir, exist_ok=True)  # Add 'import os' at the top of timegan.py
+
+    gen_path = os.path.join(save_dir, "generator.h5")
+    sup_path = os.path.join(save_dir, "supervisor.h5")
+    rec_path = os.path.join(save_dir, "recovery.h5")
+    scaler_path = os.path.join(save_dir, "scalers.npz")
+
+    # Save models
+    # Note: Using .h5 format for simplicity here.
+    generator.save(gen_path)
+    supervisor.save(sup_path)
+    recovery.save(rec_path)
+
+    # Save scalers
+    np.savez(
+        scaler_path,
+        min_val_s=min_val_s,
+        max_val_s=max_val_s,
+        min_val_x=min_val_x,
+        max_val_x=max_val_x,
+    )
+    print(f"Models and scalers saved to {save_dir}/")
+    # ------------------------------------------------------------------
+
+
+def generate_data_from_saved_models(
+    ori_data_s,
+    ori_data_x,
+    save_dir="saved_models",
+):
+    """
+    Generates synthetic data using pre-trained models.
+
+    Args:
+        - ori_data_s: original static data (for shape/param info)
+        - ori_data_x: original temporal data (for shape/param info)
+        - save_dir: directory where models and scalers are saved.
+
+    Returns:
+        - generated_data_s: generated static time-series data
+        - generated_data_x: generated temporal time-series data
+    """
+
+    print("Loading pre-trained models and scalers...")
+
+    # --- 1. Define Paths and Load Scalers ---
+    gen_path = os.path.join(save_dir, "generator.h5")
+    sup_path = os.path.join(save_dir, "supervisor.h5")
+    rec_path = os.path.join(save_dir, "recovery.h5")
+    scaler_path = os.path.join(save_dir, "scalers.npz")
+
+    try:
+        scalers = np.load(scaler_path)
+        min_val_s = scalers["min_val_s"]
+        max_val_s = scalers["max_val_s"]
+        min_val_x = scalers["min_val_x"]
+        max_val_x = scalers["max_val_x"]
+    except FileNotFoundError:
+        print(f"Error: Scaler file not found at {scaler_path}")
+        return
+
+    # --- 2. Load Models with Custom Object ---
+    # We must provide LayerNormLSTMCell as a custom object
+    # since it's a custom class used in the models.
+    custom_objects = {
+        "LayerNormLSTMCell": LayerNormLSTMCell,
+        "_sequence_mask_lambda": _sequence_mask_lambda,
+    }
+
+    try:
+        generator = tf.keras.models.load_model(
+            gen_path, custom_objects=custom_objects, safe_mode=False
+        )
+        supervisor = tf.keras.models.load_model(
+            sup_path, custom_objects=custom_objects, safe_mode=False
+        )
+        recovery = tf.keras.models.load_model(
+            rec_path, custom_objects=custom_objects, safe_mode=False
+        )
+    except (IOError, FileNotFoundError) as e:
+        print(f"Error loading models from {save_dir}. Did you train them first?")
+        print(e)
+        return
+
+    print("Models loaded successfully.")
+
+    # --- 3. Get Data Parameters ---
+    if isinstance(ori_data_s, list):
+        ori_data_s = np.asarray(ori_data_s)
+    if isinstance(ori_data_x, list):
+        ori_data_x = np.asarray(ori_data_x)
+
+    no, seq_len, dim_x = ori_data_x.shape
+    dim_s = ori_data_s.shape[1]
+    ori_time, max_seq_len = extract_time(ori_data_x)
+    z_dim_s = dim_s
+    z_dim_x = dim_x
+
+    # --- 4. Generate Synthetic Data (Copied from timegan function) ---
+    print("Generating synthetic data...")
     Z_S_mb, Z_T_mb = random_generator(no, z_dim_s, z_dim_x, ori_time, max_seq_len)
     Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)
     Z_T_mb_t = tf.convert_to_tensor(Z_T_mb, dtype=tf.float32)
@@ -557,9 +693,10 @@ def timegan(ori_data_s, ori_data_x, parameters):
         temp = generated_data_x_curr[i, : ori_time[i], :]
         generated_data_x.append(temp)
 
-    # Renormalize
+    # --- 5. Renormalize Data ---
     generated_data_s = generated_data_s * (max_val_s + 1e-7) + min_val_s
     generated_data_x = np.asarray(generated_data_x, dtype=object)
     generated_data_x = generated_data_x * (max_val_x + 1e-7) + min_val_x
 
+    print("Data generation complete.")
     return list(generated_data_s), list(generated_data_x)
