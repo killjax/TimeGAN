@@ -4,6 +4,7 @@ from tensorflow.keras.layers import (
     Input,
     Dense,
     RNN,
+    Bidirectional,
     Concatenate,
     RepeatVector,
     Lambda,
@@ -214,7 +215,8 @@ def build_discriminator(max_seq_len, hidden_dim, num_layers, module_name):
     x = C_H
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
-        x = RNN(cell, return_sequences=True)(x, mask=mask)
+        rnn_layer = RNN(cell, return_sequences=True)
+        x = Bidirectional(rnn_layer, merge_mode="concat")(x, mask=mask)
     d_outputs = x
 
     Y_T_hat = Dense(1, activation=None, name="Discriminator_X_Dense")(d_outputs)
