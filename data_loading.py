@@ -10,13 +10,10 @@ def real_data_loading(data_name, start_date, end_date):
         data_name, start=start_date, end=end_date, progress=False, auto_adjust=False
     )
 
-    # *** THIS IS THE FIX ***
-    # Force pandas to work on a clean copy, not a view
-    # This prevents all SettingWithCopyWarning and related KeyErrors
+    # Force pandas to work on a clean copy
     ori_data = ori_data.copy()
 
     # 1. Log Returns
-    # Using 'Adj Close' is common, but 'Close' is fine as in your original.
     ori_data["Log_Return"] = np.log(ori_data["Close"] / ori_data["Close"].shift(1))
 
     # 2. Average True Range (ATR)
@@ -48,16 +45,8 @@ def real_data_loading(data_name, start_date, end_date):
     rs = avg_gain / avg_loss
 
     # Handle division by zero if avg_loss is 0
-    # This line is fine as it modifies the 'rs' series directly
     rs[avg_loss == 0] = np.inf
-
     ori_data["RSI"] = 100.0 - (100.0 / (1.0 + rs))
-
-    # *** THIS LINE WAS REMOVED AS IT IS REDUNDANT ***
-    # The line above already sets RSI to 100 when rs is np.inf
-    # ori_data.loc[rs == np.inf, "RSI"] = 100
-
-    # --- End: New Feature Engineering Block ---
 
     # Drop all rows with NaN values created by .shift() or rolling windows
     ori_data = ori_data.dropna()
@@ -104,7 +93,6 @@ def calculate_window_metrics(window, adj_close_idx, log_return_idx):
     # 3. Calculate Maximum Drawdown (MDD)
     # "using its 'AdjClose' prices"
     running_max = np.maximum.accumulate(prices)
-    # Add 1e-9 to avoid division by zero if running_max is 0
     drawdowns = (running_max - prices) / (running_max + 1e-9)
     max_drawdown = np.max(drawdowns)
 
@@ -130,16 +118,10 @@ def label_data(ori_data, feature_names):
     VOLATILE_PERCENTILE = 0.85  # Top 15% of volatility (from non-crisis)
 
     # Get the column indices from the feature names
-    try:
-        adj_close_idx = feature_names.index("Adj Close")
-        log_return_idx = feature_names.index("Log_Return")
-    except ValueError as e:
-        print(f"Error: Missing required feature in 'feature_names'. {e}")
-        return None, None
+    adj_close_idx = feature_names.index("Adj Close")
+    log_return_idx = feature_names.index("Log_Return")
 
     # --- Step 1: Calculate Metrics for Every Window ---
-    print(f"\nStep 1: Calculating metrics for {len(ori_data)} windows...")
-
     all_metrics = []
     for window in ori_data:
         vol, mdd = calculate_window_metrics(window, adj_close_idx, log_return_idx)
@@ -147,16 +129,10 @@ def label_data(ori_data, feature_names):
 
     # Create the DataFrame as suggested
     metrics_df = pd.DataFrame(all_metrics)
-    print("Metric calculation complete.")
 
     # --- Step 2: Apply a Two-Stage Labeling System ---
-    print("\nStep 2: Applying two-stage labeling...")
-
     # Stage 1: Identify 'Crisis' (Drawdown-Based)
     crisis_threshold = metrics_df["mdd"].quantile(CRISIS_PERCENTILE)
-    print(
-        f"  - Crisis MDD Threshold ({CRISIS_PERCENTILE*100}th percentile): {crisis_threshold:.4f}"
-    )
 
     # Initialize all labels as 'Normal' by default
     metrics_df["label"] = "Normal"
@@ -172,9 +148,6 @@ def label_data(ori_data, feature_names):
     # Find the volatility threshold *only from the non-crisis windows*
     volatile_threshold = metrics_df.loc[non_crisis_mask, "volatility"].quantile(
         VOLATILE_PERCENTILE
-    )
-    print(
-        f"  - Volatile Vol Threshold ({VOLATILE_PERCENTILE*100}th percentile of non-crisis): {volatile_threshold:.4f}"
     )
 
     # Apply 'Volatile' label
@@ -193,23 +166,16 @@ def label_data(ori_data, feature_names):
     )
 
     # --- Step 3: Create Final One-Hot Encoded List ---
-    # As you specified:
     # [1,0,0] = Normal
     # [0,1,0] = Crisis
     # [0,0,1] = Volatile
-    print("\nStep 3: Creating final one-hot encoded list...")
-
-    # Using floats (e.g., 1.0) is good practice for ML inputs
     label_map = {
         "Normal": [1.0, 0.0, 0.0],
         "Crisis": [0.0, 1.0, 0.0],
         "Volatile": [0.0, 0.0, 1.0],
     }
 
-    # Use the 'label' column from the DataFrame to create the list
     # This maintains the exact 1-to-1 correspondence with 'ori_data'
     ori_data_s = [label_map[label] for label in metrics_df["label"]]
-
-    print(f"Finished. 'ori_data_s' is a list of length {len(ori_data_s)}.")
 
     return ori_data_s, metrics_df

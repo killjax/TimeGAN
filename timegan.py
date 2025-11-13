@@ -85,7 +85,7 @@ def build_embedder(max_seq_len, dim_s, dim_x, hidden_dim, num_layers, module_nam
         x = RNN(cell, return_sequences=True)(x, mask=mask)
     e_outputs = x
 
-    # Apply final Dense projection + sigmoid as in the original code
+    # Apply final Dense projection + sigmoid
     H_T = Dense(hidden_dim, activation="sigmoid", name="Embedder_T_Dense")(e_outputs)
 
     H = [H_S, H_T]
@@ -150,7 +150,7 @@ def build_generator(max_seq_len, z_dim_s, z_dim_x, hidden_dim, num_layers, modul
     for _ in range(num_layers):
         cell = rnn_cell(module_name, hidden_dim)
         x = RNN(cell, return_sequences=True)(x, mask=mask)
-    e_outputs = x  # This is the output from the RNN stack
+    e_outputs = x
 
     # Apply final Dense projection + sigmoid
     E_T_hat = tf.keras.layers.Dense(
@@ -229,7 +229,7 @@ def build_discriminator(max_seq_len, hidden_dim, num_layers, module_name):
 
 
 def timegan(ori_data_s, ori_data_x, parameters):
-    """TimeGAN function (TensorFlow 2.x implementation).
+    """TimeGAN function with Static integration (TensorFlow 2.x implementation).
 
     Args:
       - ori_data_s: original static time-series data
@@ -389,8 +389,6 @@ def timegan(ori_data_s, ori_data_x, parameters):
         gradients_g = g_tape.gradient(G_loss, vars_g)
         G_optimizer.apply_gradients(zip(gradients_g, vars_g))
 
-        # --- Generator Training Again ---
-        # (This is a repeat from the original code, kept for consistency)
         with tf.GradientTape() as g_tape:
             [H_S, H_T] = embedder([S_mb, X_mb, T_mb], training=True)
             [E_S_hat, E_T_hat] = generator([Z_S_mb, Z_T_mb, T_mb], training=True)
@@ -571,14 +569,12 @@ def timegan(ori_data_s, ori_data_x, parameters):
 
     print("Finish Joint Training")
 
-    # ------------------------------------------------------------------
     # --- SAVE TRAINED MODELS AND SCALERS ---
-    # ------------------------------------------------------------------
     print("Saving trained models and scalers...")
 
     # Define file paths
     save_dir = "saved_models"
-    os.makedirs(save_dir, exist_ok=True)  # Add 'import os' at the top of timegan.py
+    os.makedirs(save_dir, exist_ok=True)
 
     gen_path = os.path.join(save_dir, "generator.h5")
     sup_path = os.path.join(save_dir, "supervisor.h5")
@@ -586,7 +582,6 @@ def timegan(ori_data_s, ori_data_x, parameters):
     scaler_path = os.path.join(save_dir, "scalers.npz")
 
     # Save models
-    # Note: Using .h5 format for simplicity here.
     generator.save(gen_path)
     supervisor.save(sup_path)
     recovery.save(rec_path)
@@ -640,8 +635,6 @@ def generate_data_from_saved_models(
         return
 
     # --- 2. Load Models with Custom Object ---
-    # We must provide LayerNormLSTMCell as a custom object
-    # since it's a custom class used in the models.
     custom_objects = {
         "LayerNormLSTMCell": LayerNormLSTMCell,
         "_sequence_mask_lambda": _sequence_mask_lambda,
@@ -676,7 +669,7 @@ def generate_data_from_saved_models(
     z_dim_s = dim_s
     z_dim_x = dim_x
 
-    # --- 4. Generate Synthetic Data (Copied from timegan function) ---
+    # --- 4. Generate Synthetic Data ---
     print("Generating synthetic data...")
     Z_S_mb, Z_T_mb = random_generator(no, z_dim_s, z_dim_x, ori_time, max_seq_len)
     Z_S_mb_t = tf.convert_to_tensor(Z_S_mb, dtype=tf.float32)

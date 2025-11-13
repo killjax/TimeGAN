@@ -1,17 +1,5 @@
-"""Time-series Generative Adversarial Networks (TimeGAN) Codebase.
-
-Reference: Jinsung Yoon, Daniel Jarrett, Mihaela van der Schaar,
-"Time-series Generative Adversarial Networks,"
-Neural Information Processing Systems (NeurIPS), 2019.
-
-Paper link: https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks
-
-Last updated Date: April 24th 2020
-Code author: Jinsung Yoon (jsyoon0823@gmail.com)
-
------------------------------
-
-predictive_metrics.py
+"""
+discriminative_metrics.py
 
 Note: Use post-hoc RNN to classify original data and synthetic data
 
@@ -77,7 +65,6 @@ def discriminative_score_metrics(ori_data, generated_data):
 
     # Set maximum sequence length and each sequence length
     ori_time, ori_max_seq_len = extract_time(ori_data)
-    # [FIXED BUG]: Was using ori_data twice
     generated_time, generated_max_seq_len = extract_time(generated_data)
     max_seq_len = max([ori_max_seq_len, generated_max_seq_len])
 
@@ -135,7 +122,6 @@ def discriminative_score_metrics(ori_data, generated_data):
         X_mb_list, T_mb = batch_generator1(train_x, train_t, batch_size)
         X_hat_mb_list, T_hat_mb = batch_generator1(train_x_hat, train_t_hat, batch_size)
 
-        # [FIXED BUG]: Pad the data from batch_generator1 to max_seq_len
         # The `utils.batch_generator1` returns a list of arrays of variable length
         # We must pad them to a consistent 3D array shape.
         X_mb = np.zeros([batch_size, max_seq_len, dim])
@@ -157,7 +143,6 @@ def discriminative_score_metrics(ori_data, generated_data):
 
     ## Test the performance on the testing set
 
-    # [FIXED BUG]: Pad the test data for inference
     test_x_padded = np.zeros([len(test_x), max_seq_len, dim])
     for i in range(len(test_x)):
         if test_t[i] > 0:
@@ -172,7 +157,7 @@ def discriminative_score_metrics(ori_data, generated_data):
     test_t_arr = np.array(test_t)
     test_t_hat_arr = np.array(test_t_hat)
 
-    # Get predictions (no sess.run needed)
+    # Get predictions
     _, y_pred_real_curr = discriminator_model(test_x_padded, test_t_arr)
     _, y_pred_fake_curr = discriminator_model(test_x_hat_padded, test_t_hat_arr)
 

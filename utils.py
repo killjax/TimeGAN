@@ -1,23 +1,11 @@
-"""Time-series Generative Adversarial Networks (TimeGAN) Codebase.
-
-Reference: Jinsung Yoon, Daniel Jarrett, Mihaela van der Schaar,
-"Time-series Generative Adversarial Networks,"
-Neural Information Processing Systems (NeurIPS), 2019.
-
-Paper link: https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks
-
-Last updated Date: April 24th 2020
-Code author: Jinsung Yoon (jsyoon0823@gmail.com)
-
------------------------------
-
-utils.py (Modified for Static + Temporal Features)
+"""utils.py (Modified for Static + Temporal Features)
 
 (1) train_test_divide: Divide train and test data.
 (2) extract_time: Returns Maximum sequence length and each sequence length.
 (3) rnn_cell: Basic RNN Cell.
 (4) random_generator: random vector generator
-(5) batch_generator: mini-batch generator
+(5) batch_generator: mini-batch generator for both static and temporal features
+(6) batch_generator1: mini-batch generator for temporal features
 """
 
 ## Necessary Packages
@@ -89,9 +77,7 @@ def extract_time(data):
 
 
 class LayerNormLSTMCell(tf.keras.layers.LSTMCell):
-    """LSTMCell with Layer Normalization.
-    (No changes from original)
-    """
+    """LSTMCell with Layer Normalization."""
 
     def __init__(
         self,
@@ -146,7 +132,6 @@ class LayerNormLSTMCell(tf.keras.layers.LSTMCell):
 
 def rnn_cell(module_name, hidden_dim):
     """Basic RNN Cell.
-    (No changes from original)
 
     Args:
       - module_name: gru, lstm, or lstmLN

@@ -1,16 +1,4 @@
-"""Time-series Generative Adversarial Networks (TimeGAN) Codebase.
-
-Reference: Jinsung Yoon, Daniel Jarrett, Mihaela van der Schaar,
-"Time-series Generative Adversarial Networks,"
-Neural Information Processing Systems (NeurIPS), 2019.
-
-Paper link: https://papers.nips.cc/paper/8789-time-series-generative-adversarial-networks
-
-Last updated Date: April 24th 2020
-Code author: Jinsung Yoon (jsyoon0823@gmail.com)
-
------------------------------
-
+"""
 predictive_metrics.py
 
 Note: Use Post-hoc RNN to predict one-step ahead (last feature)
@@ -52,7 +40,7 @@ class Predictor(Model):
 
         # Get logits
         y_hat_logit = self.dense(rnn_outputs)
-        y_hat = tf.nn.sigmoid(y_hat_logit)  # As in original code
+        y_hat = tf.nn.sigmoid(y_hat_logit)
 
         return y_hat
 
@@ -76,7 +64,6 @@ def predictive_score_metrics(ori_data, generated_data):
 
     # Set maximum sequence length and each sequence length
     ori_time, ori_max_seq_len = extract_time(ori_data)
-    # [FIXED BUG]: Was using ori_data twice
     generated_time, generated_max_seq_len = extract_time(generated_data)
     # The predictive model inputs are 1 step shorter
     max_seq_len = max([ori_max_seq_len, generated_max_seq_len])
@@ -84,7 +71,7 @@ def predictive_score_metrics(ori_data, generated_data):
     ## Builde a post-hoc RNN predictive network
     # Network parameters
     hidden_dim = int(dim / 2)
-    iterations = 5000  # As in original
+    iterations = 5000
     batch_size = 128
 
     # Instantiate the Keras model
@@ -100,7 +87,7 @@ def predictive_score_metrics(ori_data, generated_data):
             # Get predictions
             y_pred = predictor_model(X, T)
 
-            # [FIXED BUG]: Create mask to compute loss only on valid data
+            # Create mask to compute loss only on valid data
             mask = tf.sequence_mask(T, maxlen=tf.shape(X)[1], dtype=tf.float32)
             # Add an extra dimension to mask to match Y's shape
             mask = tf.expand_dims(mask, -1)  # Shape: (batch, seq_len-1, 1)
@@ -125,7 +112,7 @@ def predictive_score_metrics(ori_data, generated_data):
         idx = np.random.permutation(len(generated_data))
         train_idx = idx[:batch_size]
 
-        # [FIXED BUG]: Initialize padded arrays for the batch
+        # Initialize padded arrays for the batch
         X_mb = np.zeros([batch_size, max_seq_len - 1, dim - 1], dtype=np.float32)
         Y_mb = np.zeros([batch_size, max_seq_len - 1, 1], dtype=np.float32)
         T_mb = np.zeros([batch_size], dtype=np.int32)
@@ -147,7 +134,7 @@ def predictive_score_metrics(ori_data, generated_data):
 
     ## Test the trained model on the original data
 
-    # [FIXED BUG]: Pad the entire test set for prediction
+    # Pad the entire test set for prediction
     X_test = np.zeros([no, max_seq_len - 1, dim - 1], dtype=np.float32)
     Y_test = np.zeros([no, max_seq_len - 1, 1], dtype=np.float32)
     T_test = np.zeros([no], dtype=np.int32)
@@ -165,7 +152,7 @@ def predictive_score_metrics(ori_data, generated_data):
     pred_Y_curr = predictor_model(X_test, T_test).numpy()
 
     # Compute the performance in terms of MAE
-    # [FIXED BUG]: Calculate MAE only on valid (non-padded) data
+    # Calculate MAE only on valid (non-padded) data
     MAE_temp = 0
     for i in range(no):
         T_i = T_test[i]
