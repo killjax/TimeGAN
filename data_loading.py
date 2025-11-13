@@ -131,8 +131,10 @@ def label_data(ori_data, feature_names):
     metrics_df = pd.DataFrame(all_metrics)
 
     # --- Step 2: Apply a Two-Stage Labeling System ---
+
     # Stage 1: Identify 'Crisis' (Drawdown-Based)
-    crisis_threshold = metrics_df["mdd"].quantile(CRISIS_PERCENTILE)
+    # Using a fixed 20% drawdown (Bear Market definition)
+    crisis_threshold = 0.20
 
     # Initialize all labels as 'Normal' by default
     metrics_df["label"] = "Normal"
@@ -142,20 +144,20 @@ def label_data(ori_data, feature_names):
     metrics_df.loc[crisis_mask, "label"] = "Crisis"
 
     # Stage 2: Differentiate 'Volatile' vs. 'Normal' (Volatility-Based)
-    # Create a mask for all non-crisis windows
     non_crisis_mask = metrics_df["label"] != "Crisis"
 
-    # Find the volatility threshold *only from the non-crisis windows*
-    volatile_threshold = metrics_df.loc[non_crisis_mask, "volatility"].quantile(
-        VOLATILE_PERCENTILE
-    )
+    # Using a fixed volatility based on VIX > 30
+    # VIX = 30 (0.30) is "high fear" (annualized).
+    # We must de-annualize it for our daily log_return std dev.
+    # Daily Threshold = Annual Threshold / sqrt(252 trading days)
+    volatile_threshold = 0.30 / np.sqrt(252)  # Approx 0.0189
 
     # Apply 'Volatile' label
-    # A window is 'Volatile' if it is NOT 'Crisis' AND its volatility is above the threshold
+    # A window is 'Volatile' if it is NOT 'Crisis' AND its daily volatility is high
     volatile_mask = non_crisis_mask & (metrics_df["volatility"] > volatile_threshold)
     metrics_df.loc[volatile_mask, "label"] = "Volatile"
 
-    print("Labeling complete.")
+    print("Labeling complete using fixed thresholds.")
 
     # --- Final Report ---
     print("\n--- Labeling Results ---")
@@ -166,16 +168,12 @@ def label_data(ori_data, feature_names):
     )
 
     # --- Step 3: Create Final One-Hot Encoded List ---
-    # [1,0,0] = Normal
-    # [0,1,0] = Crisis
-    # [0,0,1] = Volatile
     label_map = {
         "Normal": [1.0, 0.0, 0.0],
         "Crisis": [0.0, 1.0, 0.0],
         "Volatile": [0.0, 0.0, 1.0],
     }
 
-    # This maintains the exact 1-to-1 correspondence with 'ori_data'
     ori_data_s = [label_map[label] for label in metrics_df["label"]]
 
     return ori_data_s, metrics_df

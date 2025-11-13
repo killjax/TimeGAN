@@ -17,15 +17,12 @@ from utils import train_test_divide, extract_time, batch_generator1
 class Discriminator(Model):
     """
     Keras Model for the post-hoc discriminator.
-    Replaces the TF 1.x static graph definition.
     """
 
     def __init__(self, hidden_dim):
         super(Discriminator, self).__init__()
         self.gru_cell = layers.GRUCell(units=hidden_dim, activation="tanh")
-        # The RNN layer wraps the cell, matching tf.nn.dynamic_rnn behavior
         self.rnn = layers.RNN(self.gru_cell, return_sequences=False)
-        # Replaces tf.contrib.layers.fully_connected
         self.dense = layers.Dense(1, activation=None)
 
     def call(self, x, t):
@@ -38,7 +35,6 @@ class Discriminator(Model):
         mask = tf.sequence_mask(t, maxlen=tf.shape(x)[1])
 
         # Pass the mask to the RNN layer
-        # This replicates the behavior of 'sequence_length' in tf.nn.dynamic_rnn
         d_last_states = self.rnn(x, mask=mask)
 
         # Get logits
@@ -78,9 +74,7 @@ def discriminative_score_metrics(ori_data, generated_data):
     discriminator_model = Discriminator(hidden_dim)
 
     # Optimizer and Loss
-    # Replaces tf.train.AdamOptimizer()
     d_optimizer = optimizers.Adam()
-    # Replaces tf.nn.sigmoid_cross_entropy_with_logits
     bce_loss = tf.keras.losses.BinaryCrossentropy(from_logits=True)
 
     ## Train the discriminator

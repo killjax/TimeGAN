@@ -382,7 +382,10 @@ def timegan(ori_data_s, ori_data_x, parameters):
 
             # Total G_loss
             G_loss = (
-                G_loss_U + gamma * G_loss_U_e + 100 * tf.sqrt(G_loss_S) + 100 * G_loss_V
+                G_loss_U
+                + gamma * G_loss_U_e
+                + 1000 * tf.sqrt(G_loss_S)
+                + 1000 * G_loss_V
             )
 
         vars_g = generator.trainable_variables + supervisor.trainable_variables
@@ -434,7 +437,10 @@ def timegan(ori_data_s, ori_data_x, parameters):
             G_loss_V_T = G_loss_V_T1 + G_loss_V_T2
             G_loss_V = G_loss_V_S + G_loss_V_T
             G_loss = (
-                G_loss_U + gamma * G_loss_U_e + 100 * tf.sqrt(G_loss_S) + 100 * G_loss_V
+                G_loss_U
+                + gamma * G_loss_U_e
+                + 1000 * tf.sqrt(G_loss_S)
+                + 1000 * G_loss_V
             )
 
         vars_g = generator.trainable_variables + supervisor.trainable_variables

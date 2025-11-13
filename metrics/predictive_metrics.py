@@ -21,9 +21,7 @@ class Predictor(Model):
     def __init__(self, hidden_dim):
         super(Predictor, self).__init__()
         self.gru_cell = layers.GRUCell(units=hidden_dim, activation="tanh")
-        # return_sequences=True to predict at each time step
         self.rnn = layers.RNN(self.gru_cell, return_sequences=True)
-        # TimeDistributed Dense layer to get 1-dim output at each step
         self.dense = layers.Dense(1, activation=None)
 
     def call(self, x, t):
@@ -62,13 +60,11 @@ def predictive_score_metrics(ori_data, generated_data):
         return 0.0
     dim = ori_data[0].shape[1]
 
-    # Set maximum sequence length and each sequence length
     ori_time, ori_max_seq_len = extract_time(ori_data)
     generated_time, generated_max_seq_len = extract_time(generated_data)
-    # The predictive model inputs are 1 step shorter
     max_seq_len = max([ori_max_seq_len, generated_max_seq_len])
 
-    ## Builde a post-hoc RNN predictive network
+    ## Build a post-hoc RNN predictive network
     # Network parameters
     hidden_dim = int(dim / 2)
     iterations = 5000
@@ -77,10 +73,8 @@ def predictive_score_metrics(ori_data, generated_data):
     # Instantiate the Keras model
     predictor_model = Predictor(hidden_dim)
 
-    # Optimizer
     p_optimizer = optimizers.Adam()
 
-    # Define the training step as a tf.function for performance
     @tf.function
     def train_step(X, Y, T):
         with tf.GradientTape() as tape:
